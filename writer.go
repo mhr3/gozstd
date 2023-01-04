@@ -75,6 +75,8 @@ import (
 	"unsafe"
 )
 
+const minCompressBufferSize = 32 * 1024
+
 var (
 	cstreamInBufSize  = C.ZSTD_CStreamInSize()
 	cstreamOutBufSize = C.ZSTD_CStreamOutSize()
@@ -308,7 +310,7 @@ func (zw *Writer) ReadFrom(r io.Reader) (int64, error) {
 		}
 
 		// Flush the inBuf.
-		if err := zw.flushInBuf(); err != nil {
+		if err := zw.flushInBuf(nil); err != nil {
 			return nn, err
 		}
 	}
@@ -326,45 +328,79 @@ func (zw *Writer) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 
+	if pLen >= minCompressBufferSize {
+		if len(zw.inBuf) > 0 {
+			if err := zw.flushInBuf(nil); err != nil {
+				return 0, err
+			}
+		}
+		if err := zw.flushInBuf(p); err != nil {
+			return 0, err
+		}
+		return pLen, nil
+	}
+
 	for {
-		n := copy(zw.inBuf[len(zw.inBuf):cap(zw.inBuf)], p)
-		zw.inBuf = zw.inBuf[:len(zw.inBuf)+n]
+		inBufLen := len(zw.inBuf)
+		n := copy(zw.inBuf[inBufLen:cap(zw.inBuf)], p)
+		zw.inBuf = zw.inBuf[:inBufLen+n]
 		p = p[n:]
 		if len(p) == 0 {
 			// Fast path - just copy the data to input buffer.
 			return pLen, nil
 		}
-		if err := zw.flushInBuf(); err != nil {
+		if err := zw.flushInBuf(nil); err != nil {
 			return 0, err
 		}
 	}
 }
 
-func (zw *Writer) flushInBuf() error {
-	zw.sizes.dstSize = C.size_t(cap(zw.outBuf))
-	zw.sizes.dstPos = C.size_t(len(zw.outBuf))
-	zw.sizes.srcSize = C.size_t(len(zw.inBuf))
+func (zw *Writer) flushInBuf(source []byte) error {
+	src := source
+	if src == nil {
+		src = zw.inBuf
+	}
+
+	zw.sizes.srcSize = C.size_t(len(src))
 	zw.sizes.srcPos = 0
 
 	outHdr := (*reflect.SliceHeader)(unsafe.Pointer(&zw.outBuf))
-	inHdr := (*reflect.SliceHeader)(unsafe.Pointer(&zw.inBuf))
+	inHdr := (*reflect.SliceHeader)(unsafe.Pointer(&src))
 
-	result := C.ZSTD_compressStream_wrapper(
-		unsafe.Pointer(zw.cs), unsafe.Pointer(outHdr.Data), unsafe.Pointer(inHdr.Data),
-		&zw.sizes, C.ZSTD_e_continue)
-	ensureNoError("ZSTD_compressStream_wrapper", result)
+	for {
+		zw.sizes.dstSize = C.size_t(cap(zw.outBuf))
+		zw.sizes.dstPos = C.size_t(len(zw.outBuf))
 
-	zw.outBuf = zw.outBuf[:zw.sizes.dstPos]
+		result := C.ZSTD_compressStream_wrapper(
+			unsafe.Pointer(zw.cs), unsafe.Pointer(outHdr.Data), unsafe.Pointer(inHdr.Data),
+			&zw.sizes, C.ZSTD_e_continue)
+		ensureNoError("ZSTD_compressStream_wrapper", result)
 
-	// Move the remaining data to the start of inBuf.
-	if int(zw.sizes.srcPos) < len(zw.inBuf) {
-		copy(zw.inBuf[:cap(zw.inBuf)], zw.inBuf[zw.sizes.srcPos:len(zw.inBuf)])
-		zw.inBuf = zw.inBuf[:len(zw.inBuf)-int(zw.sizes.srcPos)]
-	} else {
+		zw.outBuf = zw.outBuf[:zw.sizes.dstPos]
+
+		if zw.sizes.srcPos == zw.sizes.srcSize {
+			// bail from the compress loop
+			break
+		}
+
+		// The input buffer is not fully consumed.
+		// This means that the output buffer must be full.
+		if err := zw.flushOutBuf(); err != nil {
+			return err
+		}
+	}
+
+	// we should only get here if the input buffer is fully consumed
+	if int(zw.sizes.srcPos) != len(src) {
+		panic("input buffer not fully consumed")
+	}
+
+	// Reset the input buffer
+	if source == nil {
 		zw.inBuf = zw.inBuf[:0]
 	}
 
-	if cap(zw.outBuf)-int(zw.sizes.dstPos) > int(zw.sizes.dstPos) && zw.sizes.srcPos > 0 {
+	if zw.sizes.dstPos <= zw.sizes.dstSize/2 && zw.sizes.srcPos > 0 {
 		// There is enough space in outBuf and the last compression
 		// succeeded, so don't flush outBuf yet.
 		return nil
@@ -376,12 +412,12 @@ func (zw *Writer) flushInBuf() error {
 }
 
 func (zw *Writer) flushOutBuf() error {
-	if len(zw.outBuf) == 0 {
+	bufLen := len(zw.outBuf)
+	if bufLen == 0 {
 		// Nothing to flush.
 		return nil
 	}
 
-	bufLen := len(zw.outBuf)
 	n, err := zw.w.Write(zw.outBuf)
 	zw.outBuf = zw.outBuf[:0]
 	if err != nil {
@@ -396,9 +432,21 @@ func (zw *Writer) flushOutBuf() error {
 
 // Flush flushes the remaining data from zw to the underlying writer.
 func (zw *Writer) Flush() error {
+	if err := zw.flushStream(); err != nil {
+		return err
+	}
+
+	if len(zw.outBuf) > 0 {
+		return zw.flushOutBuf()
+	}
+
+	return nil
+}
+
+func (zw *Writer) flushStream() error {
 	// Flush inBuf.
-	for len(zw.inBuf) > 0 {
-		if err := zw.flushInBuf(); err != nil {
+	if len(zw.inBuf) > 0 {
+		if err := zw.flushInBuf(nil); err != nil {
 			return err
 		}
 	}
@@ -413,12 +461,13 @@ func (zw *Writer) Flush() error {
 			unsafe.Pointer(zw.cs), unsafe.Pointer(outHdr.Data), &zw.sizes)
 		ensureNoError("ZSTD_flushStream", result)
 		zw.outBuf = zw.outBuf[:zw.sizes.dstPos]
-		if err := zw.flushOutBuf(); err != nil {
-			return err
-		}
 		if result == 0 {
 			// No more data left in the internal buffer.
 			return nil
+		}
+		// outBuf is full. Flush it to the underlying writer.
+		if err := zw.flushOutBuf(); err != nil {
+			return err
 		}
 	}
 }
@@ -428,7 +477,7 @@ func (zw *Writer) Flush() error {
 //
 // It doesn't close the underlying writer passed to New* functions.
 func (zw *Writer) Close() error {
-	if err := zw.Flush(); err != nil {
+	if err := zw.flushStream(); err != nil {
 		return err
 	}
 
