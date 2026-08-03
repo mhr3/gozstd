@@ -3,6 +3,13 @@ package gozstd
 /*
 #cgo CFLAGS: -O3
 
+#cgo noescape ZSTD_compressStream_wrapper
+#cgo nocallback ZSTD_compressStream_wrapper
+#cgo noescape ZSTD_endStream_wrapper
+#cgo nocallback ZSTD_endStream_wrapper
+#cgo noescape ZSTD_flushStream_wrapper
+#cgo nocallback ZSTD_flushStream_wrapper
+
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 #include "zstd_errors.h"
@@ -14,9 +21,8 @@ typedef struct {
 	size_t srcPos;
 } ZSTD_EXT_BufferSizes;
 
-// The following *_wrapper functions allow avoiding memory allocations
-// durting calls from Go.
-// See https://github.com/golang/go/issues/24450 .
+// These wrappers keep Go buffer pointers out of ZSTD_inBuffer and
+// ZSTD_outBuffer so slices can be passed directly to C.
 static size_t ZSTD_compressStream_wrapper(void *cs, void* dst, const void* src, ZSTD_EXT_BufferSizes* sizes, ZSTD_EndDirective endOp) {
 	return ZSTD_compressStream2_simpleArgs((ZSTD_CStream*)cs, dst, sizes->dstSize, &sizes->dstPos, src, sizes->srcSize, &sizes->srcPos, endOp);
 }
