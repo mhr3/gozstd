@@ -26,10 +26,6 @@ static size_t ZSTD_initDStream_usingDDict_wrapper(void *ds, void *dict) {
     return ZSTD_DCtx_refDDict(zds, (ZSTD_DDict *)dict);
 }
 
-static size_t ZSTD_freeDStream_wrapper(void *ds) {
-    return ZSTD_freeDStream((ZSTD_DStream*)ds);
-}
-
 // This wrapper keeps Go buffer pointers out of ZSTD_inBuffer and
 // ZSTD_outBuffer so slices can be passed directly to C.
 static size_t ZSTD_decompressStream_wrapper(void *ds, void* dst, const void* src, ZSTD_EXT_BufferSizes* sizes) {
@@ -138,7 +134,7 @@ func (zr *Reader) Release() {
 		return
 	}
 
-	result := C.ZSTD_freeDStream_wrapper(unsafe.Pointer(zr.ds))
+	result := C.ZSTD_freeDStream(zr.ds)
 	ensureNoError("ZSTD_freeDStream", result)
 	zr.ds = nil
 
