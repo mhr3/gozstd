@@ -79,7 +79,7 @@ env CC=arm-linux-gnueabi-gcc GOOS=linux GOARCH=arm CGO_ENABLED=1 go build ./main
 ## FAQ
 
   * Q: _Which go version is supported?_
-    A: `go1.10` and newer. Pull requests for older go versions are accepted.
+    A: `go1.24` and newer.
 
   * Q: _Which platforms/architectures are supported?_
     A: `linux/amd64`, `linux/arm`, `linux/arm64`, `linux/ppc64le`, `freebsd/amd64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`. Pull requests for other platforms/architectures

@@ -3,33 +3,20 @@ package gozstd
 /*
 #cgo CFLAGS: -O3
 
+#cgo noescape ZSTD_compressCCtx
+#cgo nocallback ZSTD_compressCCtx
+#cgo noescape ZSTD_compress_usingCDict
+#cgo nocallback ZSTD_compress_usingCDict
+#cgo noescape ZSTD_decompressDCtx
+#cgo nocallback ZSTD_decompressDCtx
+#cgo noescape ZSTD_decompress_usingDDict
+#cgo nocallback ZSTD_decompress_usingDDict
+#cgo noescape ZSTD_findDecompressedSize
+#cgo nocallback ZSTD_findDecompressedSize
+
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 #include "zstd_errors.h"
-
-// The following *_wrapper functions allow avoiding memory allocations
-// durting calls from Go.
-// See https://github.com/golang/go/issues/24450 .
-
-static size_t ZSTD_compressCCtx_wrapper(void *ctx, void *dst, size_t dstCapacity, const void *src, size_t srcSize, int compressionLevel) {
-    return ZSTD_compressCCtx((ZSTD_CCtx*)ctx, dst, dstCapacity, src, srcSize, compressionLevel);
-}
-
-static size_t ZSTD_compress_usingCDict_wrapper(void *ctx, void *dst, size_t dstCapacity, void *src, size_t srcSize, void *cdict) {
-    return ZSTD_compress_usingCDict((ZSTD_CCtx*)ctx, (void*)dst, dstCapacity, (const void*)src, srcSize, (const ZSTD_CDict*)cdict);
-}
-
-static size_t ZSTD_decompressDCtx_wrapper(void *ctx, void *dst, size_t dstCapacity, void *src, size_t srcSize) {
-    return ZSTD_decompressDCtx((ZSTD_DCtx*)ctx, (void*)dst, dstCapacity, (const void*)src, srcSize);
-}
-
-static size_t ZSTD_decompress_usingDDict_wrapper(void *ctx, void *dst, size_t dstCapacity, void *src, size_t srcSize, void *ddict) {
-    return ZSTD_decompress_usingDDict((ZSTD_DCtx*)ctx, (void*)dst, dstCapacity, (const void*)src, srcSize, (const ZSTD_DDict*)ddict);
-}
-
-static unsigned long long ZSTD_findDecompressedSize_wrapper(void *src, size_t srcSize) {
-    return ZSTD_findDecompressedSize((const void*)src, srcSize);
-}
 
 */
 import "C"
@@ -147,51 +134,31 @@ func compress(cctx, cctxDict *cctxWrapper, dst, src []byte, cd *CDict, compressi
 	return dst
 }
 
-// noescape hides a pointer from escape analysis. It is the identity function
-// but escape analysis doesn't think the output depends on the input.
-// noescape is inlined and currently compiles down to zero instructions.
-// This is copied from go's strings.Builder. Allows us to use stack-allocated
-// slices.
-//
-//go:nosplit
-//go:nocheckptr
-func noescape(p unsafe.Pointer) unsafe.Pointer {
-	x := uintptr(p)
-	return unsafe.Pointer(x ^ 0)
-}
-
 func compressInternal(cctx, cctxDict *cctxWrapper, dst, src []byte, cd *CDict, compressionLevel int, mustSucceed bool) C.size_t {
-	// using noescape will allow this to work with stack-allocated slices
-	dstPtr := noescape(unsafe.Pointer(unsafe.SliceData(dst)))
-	srcPtr := noescape(unsafe.Pointer(unsafe.SliceData(src)))
+	dstPtr := unsafe.Pointer(unsafe.SliceData(dst))
+	srcPtr := unsafe.Pointer(unsafe.SliceData(src))
 
 	if cd != nil {
-		result := C.ZSTD_compress_usingCDict_wrapper(
-			unsafe.Pointer(cctxDict.cctx),
+		result := C.ZSTD_compress_usingCDict(
+			cctxDict.cctx,
 			dstPtr,
 			C.size_t(cap(dst)),
 			srcPtr,
 			C.size_t(len(src)),
-			unsafe.Pointer(cd.p))
-		// Prevent from GC'ing of dst and src during CGO call above.
-		runtime.KeepAlive(dst)
-		runtime.KeepAlive(src)
+			cd.p)
 		if mustSucceed {
 			ensureNoError("ZSTD_compress_usingCDict", result)
 		}
 		return result
 	}
 
-	result := C.ZSTD_compressCCtx_wrapper(
-		unsafe.Pointer(cctx.cctx),
+	result := C.ZSTD_compressCCtx(
+		cctx.cctx,
 		dstPtr,
 		C.size_t(cap(dst)),
 		srcPtr,
 		C.size_t(len(src)),
 		C.int(compressionLevel))
-	// Prevent from GC'ing of dst and src during CGO call above.
-	runtime.KeepAlive(dst)
-	runtime.KeepAlive(src)
 	if mustSucceed {
 		ensureNoError("ZSTD_compressCCtx", result)
 	}
@@ -274,8 +241,8 @@ func decompress(dctx, dctxDict *dctxWrapper, dst, src []byte, dd *DDict) ([]byte
 	}
 
 	// Slow path - resize dst to fit decompressed data.
-	srcPtr := noescape(unsafe.Pointer(unsafe.SliceData(src)))
-	contentSize := C.ZSTD_findDecompressedSize_wrapper(srcPtr, C.size_t(len(src)))
+	srcPtr := unsafe.Pointer(unsafe.SliceData(src))
+	contentSize := C.ZSTD_findDecompressedSize(srcPtr, C.size_t(len(src)))
 	switch {
 	case contentSize == C.ZSTD_CONTENTSIZE_UNKNOWN || contentSize > maxFrameContentSize:
 		return streamDecompress(dst, src, dd)
@@ -306,29 +273,26 @@ func decompress(dctx, dctxDict *dctxWrapper, dst, src []byte, dd *DDict) ([]byte
 
 func decompressInternal(dctx, dctxDict *dctxWrapper, dst, src []byte, dd *DDict) C.size_t {
 	var (
-		dstPtr = noescape(unsafe.Pointer(unsafe.SliceData(dst)))
-		srcPtr = noescape(unsafe.Pointer(unsafe.SliceData(src)))
+		dstPtr = unsafe.Pointer(unsafe.SliceData(dst))
+		srcPtr = unsafe.Pointer(unsafe.SliceData(src))
 		n      C.size_t
 	)
 	if dd != nil {
-		n = C.ZSTD_decompress_usingDDict_wrapper(
-			unsafe.Pointer(dctxDict.dctx),
+		n = C.ZSTD_decompress_usingDDict(
+			dctxDict.dctx,
 			dstPtr,
 			C.size_t(cap(dst)),
 			srcPtr,
 			C.size_t(len(src)),
-			unsafe.Pointer(dd.p))
+			dd.p)
 	} else {
-		n = C.ZSTD_decompressDCtx_wrapper(
-			unsafe.Pointer(dctx.dctx),
+		n = C.ZSTD_decompressDCtx(
+			dctx.dctx,
 			dstPtr,
 			C.size_t(cap(dst)),
 			srcPtr,
 			C.size_t(len(src)))
 	}
-	// Prevent from GC'ing of dst and src during CGO call above.
-	runtime.KeepAlive(dst)
-	runtime.KeepAlive(src)
 	return n
 }
 

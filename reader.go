@@ -3,6 +3,9 @@ package gozstd
 /*
 #cgo CFLAGS: -O3
 
+#cgo noescape ZSTD_decompressStream_wrapper
+#cgo nocallback ZSTD_decompressStream_wrapper
+
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 #include "zstd_errors.h"
@@ -14,25 +17,18 @@ typedef struct {
 	size_t srcPos;
 } ZSTD_EXT_BufferSizes;
 
-// The following *_wrapper functions allow avoiding memory allocations
-// durting calls from Go.
-// See https://github.com/golang/go/issues/24450 .
-
-static size_t ZSTD_initDStream_usingDDict_wrapper(void *ds, void *dict) {
-    ZSTD_DStream *zds = (ZSTD_DStream *)ds;
-    size_t rv = ZSTD_DCtx_reset(zds, ZSTD_reset_session_only);
+static size_t ZSTD_initDStream_usingDDict_wrapper(ZSTD_DStream *ds, const ZSTD_DDict *dict) {
+    size_t rv = ZSTD_DCtx_reset(ds, ZSTD_reset_session_only);
     if (rv != 0) {
         return rv;
     }
-    return ZSTD_DCtx_refDDict(zds, (ZSTD_DDict *)dict);
+    return ZSTD_DCtx_refDDict(ds, dict);
 }
 
-static size_t ZSTD_freeDStream_wrapper(void *ds) {
-    return ZSTD_freeDStream((ZSTD_DStream*)ds);
-}
-
-static size_t ZSTD_decompressStream_wrapper(void *ds, void* dst, const void* src, ZSTD_EXT_BufferSizes* sizes) {
-    return ZSTD_decompressStream_simpleArgs((ZSTD_DStream*)ds, dst, sizes->dstSize, &sizes->dstPos, src, sizes->srcSize, &sizes->srcPos);
+// This wrapper keeps Go buffer pointers out of ZSTD_inBuffer and
+// ZSTD_outBuffer so slices can be passed directly to C.
+static size_t ZSTD_decompressStream_wrapper(ZSTD_DStream *ds, void* dst, const void* src, ZSTD_EXT_BufferSizes* sizes) {
+    return ZSTD_decompressStream_simpleArgs(ds, dst, sizes->dstSize, &sizes->dstPos, src, sizes->srcSize, &sizes->srcPos);
 }
 */
 import "C"
@@ -121,7 +117,7 @@ func initDStream(ds *C.ZSTD_DStream, dd *DDict) {
 	if dd != nil {
 		ddict = dd.p
 	}
-	result := C.ZSTD_initDStream_usingDDict_wrapper(unsafe.Pointer(ds), unsafe.Pointer(ddict))
+	result := C.ZSTD_initDStream_usingDDict_wrapper(ds, ddict)
 	ensureNoError("ZSTD_initDStream_usingDDict", result)
 }
 
@@ -137,7 +133,7 @@ func (zr *Reader) Release() {
 		return
 	}
 
-	result := C.ZSTD_freeDStream_wrapper(unsafe.Pointer(zr.ds))
+	result := C.ZSTD_freeDStream(zr.ds)
 	ensureNoError("ZSTD_freeDStream", result)
 	zr.ds = nil
 
@@ -230,7 +226,7 @@ tryDecompressAgain:
 
 	// Try decompressing inBuf into outBuf.
 	result := C.ZSTD_decompressStream_wrapper(
-		unsafe.Pointer(zr.ds), unsafe.Pointer(dstBuf), unsafe.Pointer(srcBuf), &zr.sizes)
+		zr.ds, unsafe.Pointer(dstBuf), unsafe.Pointer(srcBuf), &zr.sizes)
 
 	zr.skipNextRead = int(zr.sizes.dstPos) == cap(dst)
 	if target == nil {

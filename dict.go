@@ -3,25 +3,18 @@ package gozstd
 /*
 #cgo CFLAGS: -O3
 
+#cgo noescape ZDICT_trainFromBuffer
+#cgo nocallback ZDICT_trainFromBuffer
+#cgo noescape ZSTD_createCDict
+#cgo nocallback ZSTD_createCDict
+#cgo noescape ZSTD_createDDict
+#cgo nocallback ZSTD_createDDict
+
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 
 #define ZDICT_STATIC_LINKING_ONLY
 #include "zdict.h"
-
-#include <stdint.h>  // for uintptr_t
-
-// The following *_wrapper functions allow avoiding memory allocations
-// durting calls from Go.
-// See https://github.com/golang/go/issues/24450 .
-
-static ZSTD_CDict* ZSTD_createCDict_wrapper(uintptr_t dictBuffer, size_t dictSize, int compressionLevel) {
-	return ZSTD_createCDict((const void *)dictBuffer, dictSize, compressionLevel);
-}
-
-static ZSTD_DDict* ZSTD_createDDict_wrapper(uintptr_t dictBuffer, size_t dictSize) {
-	return ZSTD_createDDict((const void *)dictBuffer, dictSize);
-}
 
 */
 import "C"
@@ -124,14 +117,12 @@ func NewCDictLevel(dict []byte, compressionLevel int) (*CDict, error) {
 	}
 
 	cd := &CDict{
-		p: C.ZSTD_createCDict_wrapper(
-			C.uintptr_t(uintptr(unsafe.Pointer(&dict[0]))),
+		p: C.ZSTD_createCDict(
+			unsafe.Pointer(unsafe.SliceData(dict)),
 			C.size_t(len(dict)),
 			C.int(compressionLevel)),
 		compressionLevel: compressionLevel,
 	}
-	// Prevent from GC'ing of dict during CGO call above.
-	runtime.KeepAlive(dict)
 	runtime.SetFinalizer(cd, freeCDict)
 	return cd, nil
 }
@@ -168,12 +159,10 @@ func NewDDict(dict []byte) (*DDict, error) {
 	}
 
 	dd := &DDict{
-		p: C.ZSTD_createDDict_wrapper(
-			C.uintptr_t(uintptr(unsafe.Pointer(&dict[0]))),
+		p: C.ZSTD_createDDict(
+			unsafe.Pointer(unsafe.SliceData(dict)),
 			C.size_t(len(dict))),
 	}
-	// Prevent from GC'ing of dict during CGO call above.
-	runtime.KeepAlive(dict)
 	runtime.SetFinalizer(dd, freeDDict)
 	return dd, nil
 }

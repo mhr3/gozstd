@@ -3,6 +3,13 @@ package gozstd
 /*
 #cgo CFLAGS: -O3
 
+#cgo noescape ZSTD_compressStream_wrapper
+#cgo nocallback ZSTD_compressStream_wrapper
+#cgo noescape ZSTD_endStream_wrapper
+#cgo nocallback ZSTD_endStream_wrapper
+#cgo noescape ZSTD_flushStream_wrapper
+#cgo nocallback ZSTD_flushStream_wrapper
+
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 #include "zstd_errors.h"
@@ -14,14 +21,13 @@ typedef struct {
 	size_t srcPos;
 } ZSTD_EXT_BufferSizes;
 
-// The following *_wrapper functions allow avoiding memory allocations
-// durting calls from Go.
-// See https://github.com/golang/go/issues/24450 .
-static size_t ZSTD_compressStream_wrapper(void *cs, void* dst, const void* src, ZSTD_EXT_BufferSizes* sizes, ZSTD_EndDirective endOp) {
-	return ZSTD_compressStream2_simpleArgs((ZSTD_CStream*)cs, dst, sizes->dstSize, &sizes->dstPos, src, sizes->srcSize, &sizes->srcPos, endOp);
+// These wrappers keep Go buffer pointers out of ZSTD_inBuffer and
+// ZSTD_outBuffer so slices can be passed directly to C.
+static size_t ZSTD_compressStream_wrapper(ZSTD_CStream *cs, void* dst, const void* src, ZSTD_EXT_BufferSizes* sizes, ZSTD_EndDirective endOp) {
+	return ZSTD_compressStream2_simpleArgs(cs, dst, sizes->dstSize, &sizes->dstPos, src, sizes->srcSize, &sizes->srcPos, endOp);
 }
 
-static size_t ZSTD_flushStream_wrapper(void *cs, void *dst, ZSTD_EXT_BufferSizes* sizes) {
+static size_t ZSTD_flushStream_wrapper(ZSTD_CStream *cs, void *dst, ZSTD_EXT_BufferSizes* sizes) {
 	size_t res;
 	ZSTD_outBuffer outBuf;
 
@@ -29,12 +35,12 @@ static size_t ZSTD_flushStream_wrapper(void *cs, void *dst, ZSTD_EXT_BufferSizes
 	outBuf.size = sizes->dstSize;
 	outBuf.pos = sizes->dstPos;
 
-	res = ZSTD_flushStream((ZSTD_CStream*)cs, &outBuf);
+	res = ZSTD_flushStream(cs, &outBuf);
 	sizes->dstPos = outBuf.pos;
 	return res;
 }
 
-static size_t ZSTD_endStream_wrapper(void *cs, void *dst, ZSTD_EXT_BufferSizes* sizes) {
+static size_t ZSTD_endStream_wrapper(ZSTD_CStream *cs, void *dst, ZSTD_EXT_BufferSizes* sizes) {
 	size_t res;
 	ZSTD_outBuffer outBuf;
 
@@ -42,7 +48,7 @@ static size_t ZSTD_endStream_wrapper(void *cs, void *dst, ZSTD_EXT_BufferSizes* 
 	outBuf.size = sizes->dstSize;
 	outBuf.pos = sizes->dstPos;
 
-	res = ZSTD_endStream((ZSTD_CStream*)cs, &outBuf);
+	res = ZSTD_endStream(cs, &outBuf);
 	sizes->dstPos = outBuf.pos;
 	return res;
 }
@@ -326,7 +332,7 @@ func (zw *Writer) flushInBuf() error {
 	srcBuf := unsafe.SliceData(zw.inBuf)
 
 	result := C.ZSTD_compressStream_wrapper(
-		unsafe.Pointer(zw.cs), unsafe.Pointer(dstBuf), unsafe.Pointer(srcBuf),
+		zw.cs, unsafe.Pointer(dstBuf), unsafe.Pointer(srcBuf),
 		&zw.sizes, C.ZSTD_e_continue)
 	ensureNoError("ZSTD_compressStream_wrapper", result)
 
@@ -386,7 +392,7 @@ func (zw *Writer) Flush() error {
 		zw.sizes.dstPos = C.size_t(len(zw.outBuf))
 
 		result := C.ZSTD_flushStream_wrapper(
-			unsafe.Pointer(zw.cs), unsafe.Pointer(dstBuf), &zw.sizes)
+			zw.cs, unsafe.Pointer(dstBuf), &zw.sizes)
 		ensureNoError("ZSTD_flushStream", result)
 		zw.outBuf = zw.outBuf[:zw.sizes.dstPos]
 		if err := zw.flushOutBuf(); err != nil {
@@ -414,7 +420,7 @@ func (zw *Writer) Close() error {
 		zw.sizes.dstPos = C.size_t(len(zw.outBuf))
 
 		result := C.ZSTD_endStream_wrapper(
-			unsafe.Pointer(zw.cs),
+			zw.cs,
 			unsafe.Pointer(dstBuf), &zw.sizes)
 		ensureNoError("ZSTD_endStream", result)
 		zw.outBuf = zw.outBuf[:zw.sizes.dstPos]
